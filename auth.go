@@ -56,7 +56,7 @@ func (cmd Command) String() string {
 type PasswordHandle func(user string) (password string, err error)
 
 // A Reply represents a SOCKS command reply code.
-type Reply int
+type Reply uint8
 
 func (code Reply) String() string {
 	switch code {

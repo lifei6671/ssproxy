@@ -1,26 +1,17 @@
 package ssproxy
 
-type Logger interface {
-	Print(v ...interface{})
-	Printf(format string, v ...interface{})
-	Println(v ...interface{})
-	Fatal(v ...interface{})
-	Fatalf(format string, v ...interface{})
-	Fatalln(v ...interface{})
-	Panic(v ...interface{})
-	Panicln(v ...interface{})
-	Panicf(format string, v ...interface{})
-}
+import (
+	"log"
+	"os"
+)
 
-type emptyLog struct {
-}
+// Logger exported
+var GeneralLogger *log.Logger
 
-func (l *emptyLog) Print(v ...interface{})                 {}
-func (l *emptyLog) Printf(format string, v ...interface{}) {}
-func (l *emptyLog) Println(v ...interface{})               {}
-func (l *emptyLog) Fatal(v ...interface{})                 {}
-func (l *emptyLog) Fatalf(format string, v ...interface{}) {}
-func (l *emptyLog) Fatalln(v ...interface{})               {}
-func (l *emptyLog) Panic(v ...interface{})                 {}
-func (l *emptyLog) Panicln(v ...interface{})               {}
-func (l *emptyLog) Panicf(format string, v ...interface{}) {}
+// ErrorLogger exported
+var ErrorLogger *log.Logger
+
+func init() {
+	GeneralLogger = log.New(os.Stderr, "General Logger: ", log.Ldate|log.Ltime|log.Lshortfile)
+	ErrorLogger = log.New(os.Stderr, "Error Logger: ", log.Ldate|log.Ltime|log.Lshortfile)
+}

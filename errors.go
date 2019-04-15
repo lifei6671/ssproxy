@@ -2,7 +2,6 @@ package ssproxy
 
 import (
 	"errors"
-	"fmt"
 )
 
 var (
@@ -17,5 +16,6 @@ var (
 	ErrClientNoResponse       = errors.New("socks client no response")
 	ErrDomainForbidConnect    = errors.New("forbid domain connect")
 	ErrUserAuthFailed         = errors.New("socks user authentication failed")
-	ErrUnrecognizedAddrType   = fmt.Errorf("socks unrecognized address type")
+	ErrUnrecognizedAddrType   = errors.New("socks unrecognized address type")
+	ErrEmptyPassword          = errors.New("")
 )
