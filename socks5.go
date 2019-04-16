@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-const BurstLimit = 1000 * 1000 * 1000
-
 type Socks5Conn struct {
 	method AuthMethod
 	net.Conn
@@ -242,6 +240,7 @@ func (conn *Socks5Conn) Forward() error {
 		}
 		return err
 	}
+	defer remoteConn.Close()
 	//+----+-----+-------+------+----------+----------+
 	//|VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
 	//+----+-----+-------+------+----------+----------+
