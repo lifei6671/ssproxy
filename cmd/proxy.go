@@ -12,9 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/BurntSushi/toml"
-	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
 )
 
 type ChannelDefine struct {
@@ -101,11 +98,11 @@ func (c *ChannelDefine) switchss() {
 }
 
 func main() {
-	Config.Listen = "127.0.0.1:18080"
-	_, err := toml.DecodeFile("goproxy.conf", &Config)
-	if err != nil {
-		log.Fatalln("DecodeFile failed:", err)
-	}
+	Config.Listen = "127.0.0.1:8581"
+	//_, err := toml.DecodeFile("goproxy.conf", &Config)
+	//if err != nil {
+	//	log.Fatalln("DecodeFile failed:", err)
+	//}
 	for i, channel := range Config.Channel {
 		for j, d := range channel.Domains {
 			if !strings.HasPrefix(d, ".") {
@@ -131,32 +128,33 @@ func main() {
 func getConnectByChannel(channel *ChannelDefine, domain string, port uint16) (net.Conn, bool, error) {
 	log.Println(channel.Name, ":", domain)
 	if strings.HasPrefix(channel.Type, "ss,") {
-		parts := strings.SplitN(channel.Type, ",", 3)
-		if len(parts) != 3 {
-			log.Println("Config shadowsocks failed:", channel.Type)
-			return nil, false, errors.New("config_error")
-		}
+		//parts := strings.SplitN(channel.Type, ",", 3)
+		//if len(parts) != 3 {
+		//	log.Println("Config shadowsocks failed:", channel.Type)
+		//	return nil, false, errors.New("config_error")
+		//}
+		//
+		//channel.lock.RLock()
+		//if channel.addr == "" {
+		//	channel.index = 0
+		//	channel.lastWorkTime = time.Now()
+		//	channel.addr = strings.Split(channel.Addr, ",")[channel.index]
+		//}
+		//if channel.lastWorkTime.Add(time.Hour * 2).Before(time.Now()) {
+		//	// 每隔2小时，切换回最优服务器
+		//	channel.index = 0
+		//	channel.lastWorkTime = time.Now()
+		//	channel.addr = strings.Split(channel.Addr, ",")[channel.index]
+		//}
+		//addr := channel.addr
+		//channel.lock.RUnlock()
 
-		channel.lock.RLock()
-		if channel.addr == "" {
-			channel.index = 0
-			channel.lastWorkTime = time.Now()
-			channel.addr = strings.Split(channel.Addr, ",")[channel.index]
-		}
-		if channel.lastWorkTime.Add(time.Hour * 2).Before(time.Now()) {
-			// 每隔2小时，切换回最优服务器
-			channel.index = 0
-			channel.lastWorkTime = time.Now()
-			channel.addr = strings.Split(channel.Addr, ",")[channel.index]
-		}
-		addr := channel.addr
-		channel.lock.RUnlock()
-
-		c, err := connectShadowSocks(parts[1], parts[2], addr, domain, port)
-		if err != nil {
-			channel.switchss()
-		}
-		return c, false, err
+		//c, err := connectShadowSocks(parts[1], parts[2], addr, domain, port)
+		//if err != nil {
+		//channel.switchss()
+		//}
+		//return c, false, err
+		return nil, false, errors.New("a")
 	} else if channel.Type == "socks5" {
 		c, err := connectSocks5(channel.Addr, domain, port)
 		return c, false, err
@@ -169,20 +167,20 @@ func getConnectByChannel(channel *ChannelDefine, domain string, port uint16) (ne
 	}
 }
 
-func connectShadowSocks(method, password, ssaddr string, domain string, port uint16) (net.Conn, error) {
-	cipher, err := ss.NewCipher(method, password)
-	if err != nil {
-		log.Println("ss.NewCipher failed:", err)
-		return nil, err
-	}
-
-	rawaddr := make([]byte, 0, 512)
-	rawaddr = append(rawaddr, []byte{3, byte(len(domain))}...)
-	rawaddr = append(rawaddr, []byte(domain)...)
-	rawaddr = append(rawaddr, byte(port>>8))
-	rawaddr = append(rawaddr, byte(port&0xff))
-	return ss.DialWithRawAddr(rawaddr, ssaddr, cipher.Copy())
-}
+//func connectShadowSocks(method, password, ssaddr string, domain string, port uint16) (net.Conn, error) {
+//	cipher, err := ss.NewCipher(method, password)
+//	if err != nil {
+//		log.Println("ss.NewCipher failed:", err)
+//		return nil, err
+//	}
+//
+//	rawaddr := make([]byte, 0, 512)
+//	rawaddr = append(rawaddr, []byte{3, byte(len(domain))}...)
+//	rawaddr = append(rawaddr, []byte(domain)...)
+//	rawaddr = append(rawaddr, byte(port>>8))
+//	rawaddr = append(rawaddr, byte(port&0xff))
+//	return ss.DialWithRawAddr(rawaddr, ssaddr, cipher.Copy())
+//}
 
 // 根据域名获取代理
 func getProxyByDomain(domain string, port uint16) (net.Conn, bool, error) {
@@ -384,16 +382,7 @@ func buildHttpProxy(cr io.Reader, c net.Conn) (peer net.Conn, direct bool, err e
 		log.Println("Conn.Read failed:", err)
 		return
 	}
-	if bytes.HasPrefix(buff, []byte("GET http://goproxy.cfg/switch ")) {
-		for i, _ := range Config.Channel {
-			channel := &Config.Channel[i]
-			channel.switchss()
-		}
-		Config.Socks5.switchss()
-		Config.Default.switchss()
-		c.Write([]byte("HTTP/1.1 200 OK\r\n\r\nok"))
-		return
-	}
+
 	n := len(buff)
 	p1 := bytes.Index(buff[:n], []byte("http://"))
 	if p1 == -1 {
@@ -428,6 +417,7 @@ func buildHttpProxy(cr io.Reader, c net.Conn) (peer net.Conn, direct bool, err e
 		log.Println("connect socks5 failed:", err)
 		return
 	}
+	log.Println(buff[:n])
 	_, err = peer.Write(buff[:n])
 	if err != nil {
 		peer.Close()

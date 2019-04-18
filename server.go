@@ -2,6 +2,7 @@ package ssproxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -14,6 +15,19 @@ import (
 	"sync"
 	"time"
 )
+
+//需要处理服务器端无法解析的请求头
+var hopHeaders = []string{
+	"Connection",
+	"Proxy-Connection", // non-standard but still sent by libcurl and rejected by e.g. google
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",      // canonicalized version of "TE"
+	"Trailer", // not Trailers per URL above; https://www.rfc-editor.org/errata_search.php?eid=4522
+	"Transfer-Encoding",
+	"Upgrade",
+}
 
 type (
 	Socks5Negotiation struct {
@@ -42,32 +56,23 @@ type (
 )
 
 type ProxyServer struct {
-	done          <-chan struct{}
-	cancel        func()
-	limiter       *rate.Limiter
-	Authenticate  PasswordHandle
-	tunnel        *sync.Map
-	readDeadline  time.Duration
-	writeDeadline time.Duration
+	done         <-chan struct{}
+	cancel       func()
+	limiter      *rate.Limiter
+	Authenticate PasswordHandle
+	tunnel       *sync.Map
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	closed       bool
 }
 
 func NewProxyServer() *ProxyServer {
 	return &ProxyServer{tunnel: &sync.Map{}}
 }
 
-func (p *ProxyServer) SetReadDeadline(duration time.Duration) *ProxyServer {
-	p.readDeadline = duration
-	return p
-}
-
-func (p *ProxyServer) SetWriteDeadline(duration time.Duration) *ProxyServer {
-	p.writeDeadline = duration
-	return p
-}
-
 func (p *ProxyServer) SetDeadline(duration time.Duration) *ProxyServer {
-	p.readDeadline = duration
-	p.writeDeadline = duration
+	p.ReadTimeout = duration
+	p.WriteTimeout = duration
 	return p
 }
 
@@ -124,6 +129,7 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 			return fmt.Errorf("error accepting: %v", err)
 		}
 		go func() {
+			defer safeClose(conn)
 			if err := p.doProxy(conn); err != nil {
 				ErrorLogger.Println("处理请求失败 ->", err)
 			}
@@ -133,8 +139,9 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 
 func (p *ProxyServer) doProxy(c net.Conn) error {
 
-	rw := bufio.NewReader(c)
-	buff, err := rw.Peek(1)
+	cr := bufio.NewReader(c)
+
+	buff, err := cr.Peek(3)
 	if err != nil {
 		ErrorLogger.Println("识别连接类型失败 ->", err)
 		return err
@@ -142,24 +149,18 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 	var peer net.Conn
 	// 根据请求第一个字节判断是什么类型的代理
 	// 如果发起的是HTTP代理请求
-	switch buff[0] {
-	case uint8(Socks5Version):
-	case uint8(Socks4Version):
-	case byte('C'):
-		peer, err = p.buildHttpRequest(rw)
+	if bytes.Equal(buff, []byte("CON")) || (buff[0] >= 'A' && buff[0] <= 'Z') {
+		peer, err = p.buildHttpRequest(cr, c)
 		if err != nil {
-			_, _ = fmt.Fprintf(c, "HTTP/1.1 500 Connection failed, err:%s\r\n\r\n", err)
+			ErrorLogger.Println("创建 HTTP  代理失败 ->", err)
 			return err
-		} else {
-			_, err = c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
-			if err != nil {
-				ErrorLogger.Println("响应客户端失败 ->", err)
-				return err
-			}
 		}
-	default:
-		ErrorLogger.Println("不支持的代理类型 ->", buff[0])
-		return ErrVer
+	} else if buff[0] == uint8(Socks5Version) {
+
+	} else if buff[0] == uint8(Socks4Version) {
+
+	} else {
+		return fmt.Errorf("未知的协议 -> %v", buff)
 	}
 	if err != nil {
 		ErrorLogger.Println(err)
@@ -175,10 +176,8 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 		select {
 		case <-p.done:
 			_ = peer.Close()
-			_ = c.Close()
 		case <-ctx.Done():
 			_ = peer.Close()
-			_ = c.Close()
 			return
 		}
 	}()
@@ -186,77 +185,127 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 
 	GeneralLogger.Println("正在转换数据 ->", peer.RemoteAddr(), c.RemoteAddr())
 	go func() {
-		Pipe(peer, c, nil)
+		_, _ = Pipe(peer, c, nil)
 	}()
-	Pipe(c, peer, nil)
+	_, _ = Pipe(cr, peer, nil)
 	return nil
 }
 
-// buildHttpRequest 解析HTTP代理连接
-func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader) (conn net.Conn, err error) {
+func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (net.Conn, error) {
 	req, err := http.ReadRequest(reader)
 
 	if err != nil {
+		ErrorLogger.Printf("读取请求失败 -> %s %s", local.RemoteAddr(), err)
 		return nil, err
 	}
-	//remoteAddr := downstream.RemoteAddr()
-	//if remoteAddr != nil {
-	//	req.RemoteAddr = remoteAddr.String()
-	//}
-
-	if req.Method != http.MethodConnect {
-		ErrorLogger.Println("Protocol error:", req.Method)
-		return nil, errors.New("不支持的代理方式")
+	GeneralLogger.Printf("请求 -> %s -- %s -- %s", req.Method, req.RequestURI, local.RemoteAddr())
+	//如果是 Connect 连接，则直接打洞
+	if req.Method == http.MethodConnect {
+		return p.buildHttpConnectRequest(req, local)
 	}
 
-	//buff, err = reader.ReadSlice(':')
-	//if err != nil {
-	//	ErrorLogger.Println("解析域名出错 ->", err)
-	//	return nil, err
-	//}
-	//if len(buff) <= 1 {
-	//	return nil, errors.New("CONNECT protocol error: host not found")
-	//}
-	//domain := string(buff[:len(buff)-1])
-	//buff, err = reader.ReadSlice(' ')
-	//if err != nil {
-	//	ErrorLogger.Println("解析端口号失败 ->", err)
-	//	return nil, err
-	//}
-	//if len(buff) <= 1 {
-	//	ErrorLogger.Println("没有找到可用的端口号")
-	//	return nil, errors.New("CONNECT protocol error -> port not found")
-	//}
-	//_port := string(buff[:len(buff)-1])
+	outreq := req.WithContext(context.Background())
+	if req.ContentLength == 0 {
+		outreq.Body = nil
+	}
+	reqUpType := upgradeType(outreq.Header)
+	removeConnectionHeaders(outreq.Header)
 
-	GeneralLogger.Println(req.Host)
-	domain, _port, err := net.SplitHostPort(req.Host)
-	if err != nil {
+	//处理掉其他代理可能不识别的请求头
+	for _, h := range hopHeaders {
+		hv := outreq.Header.Get(h)
+		if hv == "" {
+			continue
+		}
+		if h == "Te" && hv == "trailers" {
+			continue
+		}
+		outreq.Header.Del(h)
+	}
 
-		return nil, err
+	if reqUpType != "" {
+		outreq.Header.Set("Connection", "Upgrade")
+		outreq.Header.Set("Upgrade", reqUpType)
+	}
+
+	_port := outreq.URL.Port()
+	//当时 80 端口是，客户端不会传输
+	if _port == "" {
+		_port = "80"
 	}
 	port, err := strconv.Atoi(_port)
 	if err != nil {
-		ErrorLogger.Println("端口号格式不正确 ->", err, _port)
+		ErrorLogger.Println("解析端口号失败 ->", err)
 		return nil, err
 	}
-	GeneralLogger.Println("客户端请求地址 ->", domain, port)
-	//需要将剩下的数据读取完，否则会出错
-	//for {
-	//	if buff, _, err = reader.ReadLine(); err != nil {
-	//		ErrorLogger.Println("读取剩余数据失败 ->", err)
-	//		return nil, err
-	//	} else if len(buff) == 0 {
-	//		break
-	//	}
-	//}
-	GeneralLogger.Println("正在连接远程服务器 ->", domain)
-	conn, err = p.selectSuperiorProxy(domain, uint16(port))
+	conn, err := p.selectSuperiorProxy(outreq.URL.Host, uint16(port))
 	if err != nil {
 		ErrorLogger.Println("连接远程服务器失败 ->", err)
 		return nil, err
 	}
 
+	if err := outreq.Write(conn); err != nil {
+		safeClose(conn)
+		ErrorLogger.Println("写入远程信息失败 ->", err)
+		return nil, err
+	}
+	r := bufio.NewReader(conn)
+
+	res, err := http.ReadResponse(r, outreq)
+
+	if err != nil {
+		safeClose(conn)
+		ErrorLogger.Println("获取响应失败 ->", err)
+		return nil, err
+	}
+	//如果是 websocket 则不能断开连接直接返回即可
+	if res.StatusCode == http.StatusSwitchingProtocols {
+		if err := res.Write(local); err != nil {
+			safeClose(conn)
+			return nil, err
+		}
+		return conn, nil
+	}
+	removeConnectionHeaders(res.Header)
+
+	for _, h := range hopHeaders {
+		res.Header.Del(h)
+	}
+
+	if err := res.Write(local); err != nil {
+		safeClose(conn)
+		return nil, err
+	}
+	// 如果正确的处理了 Proxy-Connection  请求头，则不需要关闭连接，客户端会复用
+	return conn, nil
+}
+
+func (p *ProxyServer) buildHttpConnectRequest(req *http.Request, local net.Conn) (conn net.Conn, err error) {
+	domain, _port, err1 := net.SplitHostPort(req.Host)
+	if err1 != nil {
+		ErrorLogger.Println("解析端口号失败 ->", req.Host, err1)
+		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err1)
+		return nil, err1
+	}
+	port, err1 := strconv.Atoi(_port)
+	if err != nil {
+		ErrorLogger.Println("端口号格式不正确 ->", err1, _port)
+		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err1)
+		return nil, err1
+	}
+	conn, err = p.selectSuperiorProxy(domain, uint16(port))
+	if err != nil {
+		ErrorLogger.Println("连接远程服务器失败 ->", err)
+		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err)
+		return nil, err
+	}
+	GeneralLogger.Println(req.Host, req.Proto)
+	_, err = local.Write([]byte(req.Proto + " 200 Connection established\r\n\r\n"))
+	if err != nil {
+		safeClose(conn)
+		ErrorLogger.Println("响应客户端失败 ->", err)
+		return nil, err
+	}
 	return
 }
 
@@ -273,7 +322,7 @@ func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16) (conn net.
 		}
 	}
 
-	return net.DialTimeout("tcp", fmt.Sprintf("%s:%d", domain, port), time.Second*30)
+	return net.DialTimeout("tcp", fmt.Sprintf("%s:%v", domain, port), time.Second*30)
 }
 
 func (p *ProxyServer) connectSocks5Server(tunnel ProxyTunnel, domain string, port uint16) (conn net.Conn, err error) {
@@ -437,6 +486,7 @@ func (p *ProxyServer) Close() error {
 	if p.cancel != nil {
 		p.cancel()
 	}
+	p.closed = true
 	return nil
 }
 
@@ -447,6 +497,5 @@ func safeClose(conn net.Conn) {
 			ErrorLogger.Printf("panic on closing connection from %v: %v", conn.RemoteAddr(), p)
 		}
 	}()
-
 	_ = conn.Close()
 }

@@ -75,7 +75,7 @@ func (p *Pipeline) Pipe(local, remote net.Conn, trafficFunc TrafficFunc) (writte
 
 	return written, err
 }
-func Pipe(src, dst io.ReadWriter, trafficFunc TrafficFunc) (written int64, err error) {
+func Pipe(reader io.Reader, writer io.Writer, trafficFunc TrafficFunc) (written int64, err error) {
 	buf := pipeBytePool.Get().([]byte)
 
 	defer func() {
@@ -83,10 +83,10 @@ func Pipe(src, dst io.ReadWriter, trafficFunc TrafficFunc) (written int64, err e
 	}()
 	for {
 
-		nr, er := src.Read(buf)
+		nr, er := reader.Read(buf)
 
 		if nr > 0 {
-			nw, ew := dst.Write(buf[0:nr])
+			nw, ew := writer.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
 				if trafficFunc != nil {
