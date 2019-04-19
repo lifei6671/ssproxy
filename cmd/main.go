@@ -46,6 +46,7 @@ func main() {
 	proxy := ssproxy.NewProxyServer()
 	//proxy.AddRouter("www.xin.com", ssproxy.ProxyTunnel{UserName: "root", Password: "123456", Type: "socks5", Addr: "127.0.0.1:1080"})
 	proxy.SetDeadline(time.Second * 30)
+	proxy.AddRegexpRouter(ssproxy.ProxyTunnel{Name: "*.google.com", UserName: "aes-256-cfb", Password: "_hvolZ8H-mZ_bTar", Type: "ss", Addr: "la1533.256ss.com:32318"})
 
 	defer func() {
 		_ = proxy.Close()
