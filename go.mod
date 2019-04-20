@@ -3,6 +3,7 @@ module github.com/lifei6671/ssproxy
 go 1.12
 
 require (
+	github.com/BurntSushi/toml v0.3.1
 	github.com/aead/chacha20 v0.0.0-20180709150244-8b13a72661da
 	github.com/cihub/seelog v0.0.0-20170130134532-f561c5e57575
 	github.com/pkg/errors v0.8.1

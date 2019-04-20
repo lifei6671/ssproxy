@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"github.com/BurntSushi/toml"
 	"github.com/lifei6671/ssproxy"
 	"github.com/lifei6671/ssproxy/logs"
 	"gopkg.in/urfave/cli.v2"
+	"io/ioutil"
 	"log"
 	"os"
 	"time"
@@ -39,6 +41,7 @@ type (
 	ProxyConfig struct {
 		Listen string                 `toml:"listen"`
 		Proxy  map[string]ProxyTunnel `toml:"proxy"`
+		Rules  []Rule                 `toml:"rules"`
 	}
 	ProxyTunnel struct {
 		Name     string `toml:"name" json:"name"`
@@ -47,8 +50,20 @@ type (
 		UserName string `toml:"username" json:"username"`
 		Password string `toml:"password" json:"password"`
 	}
-	ProxyRouter struct {
-		Proxy
+	Rule struct {
+		//支持多个代理负载均衡
+		Proxy []struct {
+			//代理名称
+			ProxyName string `toml:"proxy_name"`
+			//权重，权重越高流量越大
+			Weight int `toml:"weight" json:"weight"`
+		} `toml:"proxy" json:"proxy"`
+		//匹配规则
+		Condition struct {
+			//规则类型：如果是 GFW 则 Pattern 指定的是 GFWList 获取地址，默认 HostWildcardCondition 规则统配，HostRegexCondition：域名正则
+			ConditionType string `toml:"condition_type" json:"condition_type"`
+			Pattern       string `toml:"pattern" json:"pattern"`
+		} `toml:"condition" json:"condition"`
 	}
 )
 
@@ -90,6 +105,17 @@ var start = &cli.Command{
 		},
 	},
 	Action: func(ctx *cli.Context) error {
+
+		configFile := ctx.String("config")
+
+		if b, err := ioutil.ReadFile(configFile); err == nil {
+			var config ProxyConfig
+			if _, err := toml.Decode(string(b), &config); err != nil {
+				logs.Error("解析配置失败 ->", err)
+				os.Exit(-1)
+			}
+
+		}
 
 		return nil
 	},
