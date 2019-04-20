@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"github.com/pkg/errors"
@@ -13,9 +14,9 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"regexp"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,25 +34,7 @@ var hopHeaders = []string{
 }
 
 type (
-	Socks5Negotiation struct {
-		Version      uint8
-		NumOfMethods uint8
-		Methods      []uint8
-	}
-
-	Socks5Request struct {
-		Version         uint8
-		Command         uint8
-		RSV             uint8
-		AddressType     uint8
-		Address         string
-		Port            uint16
-		AddressWithPort string
-		RawAddr         []byte
-	}
 	ProxyTunnel struct {
-		expvar   *regexp.Regexp
-		IsRegexp bool   `toml:"is_regexp" json:"is_regexp"`
 		Name     string `toml:"name" json:"name"`
 		Type     string `toml:"type" json:"type"`
 		Addr     string `toml:"addr" json:"addr"`
@@ -70,13 +53,15 @@ type ProxyServer struct {
 	limiter      *rate.Limiter
 	Authenticate PasswordHandle
 	tunnel       *sync.Map
+	rule         *RuleMatcher
+	ruleId       int32
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	closed       bool
 }
 
 func NewProxyServer() *ProxyServer {
-	return &ProxyServer{tunnel: &sync.Map{}}
+	return &ProxyServer{tunnel: &sync.Map{}, rule: NewMatcher()}
 }
 
 func (p *ProxyServer) SetDeadline(duration time.Duration) *ProxyServer {
@@ -85,19 +70,45 @@ func (p *ProxyServer) SetDeadline(duration time.Duration) *ProxyServer {
 	return p
 }
 
-func (p *ProxyServer) AddRouter(tunnel ProxyTunnel) *ProxyServer {
+func (p *ProxyServer) AddRouter(s string, tunnel ProxyTunnel) error {
 
-	p.tunnel.Store(tunnel.Name, &tunnel)
-	return p
+	rule, err := ParseRule(s)
+	if err != nil {
+		ErrorLogger.Println("解析规则失败 ->", s, err)
+		return err
+	}
+
+	ruleId := int(atomic.AddInt32(&(p.ruleId), 1))
+	p.tunnel.Store(ruleId, &tunnel)
+	return p.rule.AddRule(rule, ruleId)
 }
 
-func (p *ProxyServer) AddRegexpRouter(tunnel ProxyTunnel) error {
-	exp, err := regexp.Compile(tunnel.Name)
+func (p *ProxyServer) AddRouteFromGFWList(rawurl string, tunnel ProxyTunnel) error {
+	resp, err := http.Get(rawurl)
+
 	if err != nil {
 		return err
 	}
-	tunnel.expvar = exp
-	p.tunnel.Store(tunnel.Name, tunnel)
+	defer resp.Body.Close()
+	decoder := base64.NewDecoder(base64.StdEncoding, resp.Body)
+
+	reader := bufio.NewReader(decoder)
+
+	for {
+		line, _, err := reader.ReadLine()
+		if err != nil {
+			if err != io.EOF {
+				ErrorLogger.Println("读取 GFW 规则失败 ->", err)
+			}
+			break
+		}
+		GeneralLogger.Println(string(line))
+		if len(line) > 0 && !bytes.HasPrefix(line, []byte("!")) {
+			if err := p.AddRouter(string(line), tunnel); err != nil {
+				ErrorLogger.Println("解析GFW规则失败 ->", string(line), err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -187,9 +198,9 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 	} else {
 		return fmt.Errorf("未知的协议 -> %v", buff)
 	}
-	if err != nil {
-		ErrorLogger.Println(err)
-		return err
+	if peer == nil {
+		ErrorLogger.Println("未能初始化远程连接 ->", c.RemoteAddr())
+		return fmt.Errorf("未能初始化远程连接 -> %s", c.RemoteAddr())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -263,7 +274,7 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 		ErrorLogger.Println("解析端口号失败 ->", err)
 		return nil, err
 	}
-	conn, err := p.selectSuperiorProxy(outreq.URL.Host, uint16(port))
+	conn, err := p.selectSuperiorProxy(outreq.URL.Host, uint16(port), req.RequestURI)
 	if err != nil {
 		ErrorLogger.Println("连接远程服务器失败 ->", err)
 		return nil, err
@@ -318,7 +329,7 @@ func (p *ProxyServer) buildHttpConnectRequest(req *http.Request, local net.Conn)
 		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err1)
 		return nil, err1
 	}
-	conn, err = p.selectSuperiorProxy(domain, uint16(port))
+	conn, err = p.selectSuperiorProxy(domain, uint16(port), req.RequestURI)
 	if err != nil {
 		ErrorLogger.Println("连接远程服务器失败 ->", err)
 		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err)
@@ -533,16 +544,19 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	if fqdn != "" {
 		addr = fqdn
 
-	} else {
+	} else if ip != nil {
 		addr = ip.String()
+	} else {
+		return nil, ErrAddrType
 	}
 	GeneralLogger.Printf("通过 Socks 方式连接 -> %s ---> %s:%d", local.RemoteAddr(), addr, port)
-	conn, err := p.selectSuperiorProxy(addr, port)
+	conn, err := p.selectSuperiorProxy(addr, port, addr)
 
 	if err != nil {
+		ErrorLogger.Printf("连接远程服务器失败 -> %s:%d", addr, port)
 		safeClose(conn)
 		if _, err := p.replaySocks5Client(local, 0x03); err != nil {
-			ErrorLogger.Println("写入客户端失败 ->", conn.RemoteAddr(), err)
+			ErrorLogger.Printf("写入客户端失败 -> %s:%d - %s", addr, port, err)
 		}
 		return nil, err
 	}
@@ -556,21 +570,28 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 }
 
 // selectSuperiorProxy 选中一个远程代理
-func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16) (conn net.Conn, err error) {
+func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16, rawurl string) (conn net.Conn, err error) {
 	var proxy *ProxyTunnel
-	host := fmt.Sprintf("%s:%d", domain, port)
-	p.tunnel.Range(func(key, value interface{}) bool {
-		if tunnel, ok := value.(*ProxyTunnel); ok {
-			if (tunnel.IsRegexp && (tunnel.expvar.MatchString(domain) || tunnel.expvar.MatchString(host))) ||
-				(!tunnel.IsRegexp && (tunnel.Name == domain || tunnel.Name == host)) {
-				proxy = tunnel
-				return false
+
+	if rawurl != "" {
+		req := &Request{
+			URL: rawurl,
+		}
+		matched, ruleId, err := p.rule.Match(req)
+
+		if err != nil {
+			ErrorLogger.Println("匹配规则失败 ->", rawurl, err)
+		} else if matched {
+			if v, ok := p.tunnel.Load(ruleId); ok {
+				if value, ok := v.(*ProxyTunnel); ok {
+					proxy = value
+				}
 			}
 		}
-		return true
-	})
+	}
+
 	if proxy != nil {
-		GeneralLogger.Printf("通过远程代理连接服务器 -> %s --> %s", host, proxy)
+		GeneralLogger.Printf("通过远程代理[%s]连接服务器 -> %s --> %s", proxy.Addr, rawurl, proxy)
 		if proxy.Type == "socks5" {
 			return p.connectSocks5Server(*proxy, domain, port)
 		} else if proxy.Type == "socks4" {
@@ -775,5 +796,7 @@ func safeClose(conn net.Conn) {
 			ErrorLogger.Printf("panic on closing connection from  %v", p)
 		}
 	}()
-	_ = conn.Close()
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
