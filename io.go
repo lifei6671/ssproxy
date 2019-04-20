@@ -1,8 +1,8 @@
 package ssproxy
 
 import (
+	"github.com/lifei6671/ssproxy/logs"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -53,7 +53,7 @@ func (p *Pipeline) Pipe(local, remote net.Conn, trafficFunc TrafficFunc) (writte
 			if ew != nil {
 				err = ew
 				if oe, ok := ew.(*net.OpError); ok {
-					log.Println("write OpError ->", oe.Op, oe.Err)
+					logs.Error("write OpError ->", oe.Op, oe.Err)
 				}
 				break
 			}
@@ -66,7 +66,7 @@ func (p *Pipeline) Pipe(local, remote net.Conn, trafficFunc TrafficFunc) (writte
 			if er != io.EOF {
 				err = er
 				if oe, ok := err.(*net.OpError); ok {
-					log.Println("read OpError ->", oe.Op, oe.Err)
+					logs.Error("read OpError ->", oe.Op, oe.Err)
 				}
 			}
 			break
@@ -96,7 +96,7 @@ func Pipe(reader io.Reader, writer io.Writer, trafficFunc TrafficFunc) (written 
 			if ew != nil {
 				err = ew
 				if oe, ok := ew.(*net.OpError); ok {
-					log.Println("write OpError ->", oe.Op, oe.Err)
+					logs.Error("write OpError ->", oe.Op, oe.Err)
 				}
 				break
 			}
@@ -109,7 +109,7 @@ func Pipe(reader io.Reader, writer io.Writer, trafficFunc TrafficFunc) (written 
 			if er != io.EOF {
 				err = er
 				if oe, ok := err.(*net.OpError); ok {
-					log.Println("read OpError ->", oe.Op, oe.Err)
+					logs.Error("read OpError ->", oe.Op, oe.Err)
 				}
 			}
 			break

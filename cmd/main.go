@@ -3,24 +3,94 @@ package main
 import (
 	"context"
 	"github.com/lifei6671/ssproxy"
+	"github.com/lifei6671/ssproxy/logs"
+	"gopkg.in/urfave/cli.v2"
 	"log"
+	"os"
 	"time"
 )
 
+const defaultGFWListURL = "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
+const APP_VERSION = "0.1"
+
 func main() {
+	defer logs.Flush()
 
 	proxy := ssproxy.NewProxyServer()
-	//proxy.AddRouter("www.xin.com", ssproxy.ProxyTunnel{UserName: "root", Password: "123456", Type: "socks5", Addr: "127.0.0.1:1080"})
+
 	proxy.SetDeadline(time.Second * 30)
-	tunnel := ssproxy.ProxyTunnel{Name: "ss", UserName: "aes-256-cfb", Password: "_hvolZ8H-mZ_bTar", Type: "ss", Addr: "la1533.256ss.com:32318"}
-	if err := proxy.AddRouteFromGFWList("https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt", tunnel); err != nil {
-		log.Fatal("添加路由失败 ->", err)
-	}
+	go func() {
+		tunnel := &ssproxy.ProxyTunnel{Name: "ss", UserName: "aes-256-cfb", Password: "_hvolZ8H-mZ_bTar", Type: "ss", Addr: "la1533.256ss.com:32318"}
+		if err := proxy.AddRouteFromGFWList(defaultGFWListURL, tunnel); err != nil {
+			log.Fatal("添加路由失败 ->", err)
+		}
+	}()
 
 	defer func() {
 		_ = proxy.Close()
 	}()
+
 	if err := proxy.Listen(context.Background(), "tcp", "127.0.0.1:8580"); err != nil {
 		log.Fatal(err)
 	}
+}
+
+type (
+	ProxyConfig struct {
+		Listen string                 `toml:"listen"`
+		Proxy  map[string]ProxyTunnel `toml:"proxy"`
+	}
+	ProxyTunnel struct {
+		Name     string `toml:"name" json:"name"`
+		Type     string `toml:"type" json:"type"`
+		Addr     string `toml:"addr" json:"addr"`
+		UserName string `toml:"username" json:"username"`
+		Password string `toml:"password" json:"password"`
+	}
+	ProxyRouter struct {
+		Proxy
+	}
+)
+
+func Run() {
+	app := &cli.App{}
+	app.Name = "ssproxy"
+	app.Usage = "A proxy tool"
+	app.Version = APP_VERSION
+	app.Commands = []*cli.Command{
+		start,
+	}
+	err := app.Run(os.Args)
+	if err != nil {
+		log.Fatalf("启动命令行失败 -> %s", err)
+	}
+}
+
+var start = &cli.Command{
+	Name:        "run",
+	Usage:       "启动本地代理",
+	Description: `启动一个本地代理,支持HTTP、Socks5代理，支持二级代理以及ShadowSocks.`,
+	Flags: []cli.Flag{
+		&cli.StringFlag{
+			Name:    "gfwlist",
+			Aliases: []string{"gfw"},
+			Value:   defaultGFWListURL,
+			Usage:   "GFW文件原始URL",
+		},
+		&cli.StringFlag{
+			Name:    "config",
+			Aliases: []string{"f"},
+			Value:   "./config/config.conf",
+			Usage:   "配置文件路径",
+		},
+		&cli.StringFlag{
+			Name:  "addr",
+			Value: ":8580",
+			Usage: "本地监听的地址和端口号：127.0.0.1:8580",
+		},
+	},
+	Action: func(ctx *cli.Context) error {
+
+		return nil
+	},
 }

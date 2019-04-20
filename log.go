@@ -1,17 +1,17 @@
 package ssproxy
 
 import (
-	"log"
+	logs "log"
 	"os"
 )
 
 // Logger exported
-var GeneralLogger *log.Logger
+var GeneralLogger *logs.Logger
 
 // ErrorLogger exported
-var ErrorLogger *log.Logger
+var ErrorLogger *logs.Logger
 
 func init() {
-	GeneralLogger = log.New(os.Stderr, "General Logger: ", log.Ldate|log.Ltime|log.Lshortfile)
-	ErrorLogger = log.New(os.Stderr, "Error Logger: ", log.Ldate|log.Ltime|log.Lshortfile)
+	GeneralLogger = logs.New(os.Stderr, "General Logger: ", logs.Ldate|logs.Ltime|logs.Lshortfile)
+	ErrorLogger = logs.New(os.Stderr, "Error Logger: ", logs.Ldate|logs.Ltime|logs.Lshortfile)
 }

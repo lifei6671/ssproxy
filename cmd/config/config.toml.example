@@ -1,0 +1,10 @@
+listen = ":8580"
+gfwlist=
+
+[proxy]
+  [proxy.ss]
+  name=ss
+  type=ss
+  addr=
+  username
+  password

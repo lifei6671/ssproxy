@@ -7,11 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"github.com/lifei6671/ssproxy/logs"
 	"github.com/pkg/errors"
 	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
 	"golang.org/x/time/rate"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -70,26 +70,28 @@ func (p *ProxyServer) SetDeadline(duration time.Duration) *ProxyServer {
 	return p
 }
 
-func (p *ProxyServer) AddRouter(s string, tunnel ProxyTunnel) error {
-
+func (p *ProxyServer) AddRouter(s string, tunnel *ProxyTunnel) error {
 	rule, err := ParseRule(s)
 	if err != nil {
-		ErrorLogger.Println("解析规则失败 ->", s, err)
+		logs.Error("解析规则失败 ->", s, err)
 		return err
 	}
 
 	ruleId := int(atomic.AddInt32(&(p.ruleId), 1))
-	p.tunnel.Store(ruleId, &tunnel)
+	if _, ok := p.tunnel.Load(ruleId); ok {
+		logs.Debug("Rule Id 已被使用 ->", ruleId)
+	}
+	p.tunnel.Store(ruleId, tunnel)
 	return p.rule.AddRule(rule, ruleId)
 }
 
-func (p *ProxyServer) AddRouteFromGFWList(rawurl string, tunnel ProxyTunnel) error {
+func (p *ProxyServer) AddRouteFromGFWList(rawurl string, tunnel *ProxyTunnel) error {
 	resp, err := http.Get(rawurl)
 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer safeClose(resp.Body)
 	decoder := base64.NewDecoder(base64.StdEncoding, resp.Body)
 
 	reader := bufio.NewReader(decoder)
@@ -98,14 +100,13 @@ func (p *ProxyServer) AddRouteFromGFWList(rawurl string, tunnel ProxyTunnel) err
 		line, _, err := reader.ReadLine()
 		if err != nil {
 			if err != io.EOF {
-				ErrorLogger.Println("读取 GFW 规则失败 ->", err)
+				logs.Error("读取 GFW 规则失败 ->", err)
 			}
 			break
 		}
-		GeneralLogger.Println(string(line))
 		if len(line) > 0 && !bytes.HasPrefix(line, []byte("!")) {
 			if err := p.AddRouter(string(line), tunnel); err != nil {
-				ErrorLogger.Println("解析GFW规则失败 ->", string(line), err)
+				logs.Error("解析GFW规则失败 ->", string(line), err)
 			}
 		}
 	}
@@ -122,7 +123,7 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 
 	l, err := net.Listen(network, address)
 	if err != nil {
-		ErrorLogger.Println("启动监听失败 ->", err)
+		logs.Error("启动监听失败 ->", err)
 		return err
 	}
 	ctx1, cancel := context.WithCancel(ctx)
@@ -131,7 +132,7 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 	go func() {
 		p.done = ctx1.Done()
 	}()
-	GeneralLogger.Println("正在监听地址 ->", l.Addr())
+	logs.Info("正在监听地址 ->", l.Addr())
 	var tempDelay time.Duration // how long to sleep on accept failure
 
 	for {
@@ -142,7 +143,7 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 		}
 		conn, err := l.Accept()
 		if err != nil {
-			ErrorLogger.Println("接受请求失败 ->", err)
+			logs.Errorf("Failed to accept new TCP connection of type %s: %v", address, err)
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				// delay code based on net/http.Server
 				if tempDelay == 0 {
@@ -153,7 +154,7 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 				if max := 1 * time.Second; tempDelay > max {
 					tempDelay = max
 				}
-				ErrorLogger.Printf("http: Accept error: %v; retrying in %v", err, tempDelay)
+				logs.Errorf("http: Accept error: %v; retrying in %v", err, tempDelay)
 				time.Sleep(tempDelay)
 				continue
 			}
@@ -162,7 +163,7 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 		go func() {
 			defer safeClose(conn)
 			if err := p.doProxy(conn); err != nil {
-				ErrorLogger.Println("处理请求失败 ->", err)
+				logs.Error("处理请求失败 ->", err)
 			}
 		}()
 	}
@@ -174,7 +175,7 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 
 	buff, err := cr.Peek(3)
 	if err != nil {
-		ErrorLogger.Println("识别连接类型失败 ->", err)
+		logs.Errorf("识别连接类型失败 -> %v", err)
 		return err
 	}
 	var peer net.Conn
@@ -184,7 +185,7 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 	if bytes.Equal(buff, []byte("CON")) || (buff[0] >= 'A' && buff[0] <= 'Z') {
 		peer, err = p.buildHttpRequest(cr, c)
 		if err != nil {
-			ErrorLogger.Println("创建 HTTP  代理失败 ->", err)
+			logs.Errorf("创建 HTTP  代理失败 -> %v", err)
 			return err
 		}
 	} else if buff[0] == uint8(Socks5Version) {
@@ -199,15 +200,15 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 		return fmt.Errorf("未知的协议 -> %v", buff)
 	}
 	if peer == nil {
-		ErrorLogger.Println("未能初始化远程连接 ->", c.RemoteAddr())
+		logs.Errorf("未能初始化远程连接 -> %s", c.RemoteAddr())
 		return fmt.Errorf("未能初始化远程连接 -> %s", c.RemoteAddr())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		localAddr, remoteAddr := c.RemoteAddr(), peer.RemoteAddr()
-		GeneralLogger.Println("等待连接关闭通知 ->", localAddr, remoteAddr)
+		logs.Info("等待连接关闭通知 ->", localAddr, remoteAddr)
 		defer func() {
-			GeneralLogger.Println("连接已关闭 ->", localAddr, remoteAddr)
+			logs.Info("连接已关闭 ->", localAddr, remoteAddr)
 		}()
 		select {
 		case <-p.done:
@@ -219,11 +220,11 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 	}()
 	defer cancel()
 
-	GeneralLogger.Println("正在转换数据 ->", peer.RemoteAddr(), c.RemoteAddr())
+	logs.Info("正在转换数据 ->", peer.RemoteAddr(), c.RemoteAddr())
 	go func() {
-		_, _ = Pipe(peer, c, nil)
+		_, _ = NewPipeline(time.Second*30000, time.Second*30).Pipe(peer, c, nil)
 	}()
-	_, _ = Pipe(cr, peer, nil)
+	_, _ = NewPipeline(time.Second*300000, time.Second*30).Pipe(c, peer, nil)
 	return nil
 }
 
@@ -231,10 +232,10 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 	req, err := http.ReadRequest(reader)
 
 	if err != nil {
-		ErrorLogger.Printf("读取请求失败 -> %s %s", local.RemoteAddr(), err)
+		logs.Errorf("读取请求失败 -> %s %s", local.RemoteAddr(), err)
 		return nil, err
 	}
-	GeneralLogger.Printf("请求 -> %s -- %s -- %s", req.Method, req.RequestURI, local.RemoteAddr())
+	logs.Infof("解析请求 -> %s -- %s -- %s", req.Method, req.RequestURI, local.RemoteAddr())
 	//如果是 Connect 连接，则直接打洞
 	if req.Method == http.MethodConnect {
 		return p.buildHttpConnectRequest(req, local)
@@ -271,18 +272,18 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 	}
 	port, err := strconv.Atoi(_port)
 	if err != nil {
-		ErrorLogger.Println("解析端口号失败 ->", err)
+		logs.Error("解析端口号失败 ->", err)
 		return nil, err
 	}
 	conn, err := p.selectSuperiorProxy(outreq.URL.Host, uint16(port), req.RequestURI)
 	if err != nil {
-		ErrorLogger.Println("连接远程服务器失败 ->", err)
+		logs.Error("连接远程服务器失败 ->", err)
 		return nil, err
 	}
 
 	if err := outreq.Write(conn); err != nil {
 		safeClose(conn)
-		ErrorLogger.Println("写入远程信息失败 ->", err)
+		logs.Error("写入远程信息失败 ->", err)
 		return nil, err
 	}
 	r := bufio.NewReader(conn)
@@ -291,7 +292,7 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 
 	if err != nil {
 		safeClose(conn)
-		ErrorLogger.Println("获取响应失败 ->", err)
+		logs.Error("获取响应失败 ->", err)
 		return nil, err
 	}
 	//如果是 websocket 则不能断开连接直接返回即可
@@ -319,27 +320,26 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 func (p *ProxyServer) buildHttpConnectRequest(req *http.Request, local net.Conn) (conn net.Conn, err error) {
 	domain, _port, err1 := net.SplitHostPort(req.Host)
 	if err1 != nil {
-		ErrorLogger.Println("解析端口号失败 ->", req.Host, err1)
+		logs.Error("解析端口号失败 ->", req.Host, err1)
 		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err1)
 		return nil, err1
 	}
 	port, err1 := strconv.Atoi(_port)
-	if err != nil {
-		ErrorLogger.Println("端口号格式不正确 ->", err1, _port)
+	if err1 != nil {
+		logs.Error("端口号格式不正确 ->", err1, _port)
 		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err1)
 		return nil, err1
 	}
 	conn, err = p.selectSuperiorProxy(domain, uint16(port), req.RequestURI)
 	if err != nil {
-		ErrorLogger.Println("连接远程服务器失败 ->", err)
+		logs.Errorf("连接远程服务器失败 ->", err)
 		_, _ = fmt.Fprintf(local, req.Proto+" 500 Connection failed, err:%s\r\n\r\n", err)
 		return nil, err
 	}
-	GeneralLogger.Println(req.Host, req.Proto)
 	_, err = local.Write([]byte(req.Proto + " 200 Connection established\r\n\r\n"))
 	if err != nil {
 		safeClose(conn)
-		ErrorLogger.Println("响应客户端失败 ->", err)
+		logs.Error("响应客户端失败 ->", err)
 		return nil, err
 	}
 	return
@@ -356,20 +356,20 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	buf := make([]byte, 258)
 
 	if _, err := io.ReadFull(reader, buf[0:2]); err != nil {
-		ErrorLogger.Println("读取数据失败 ->", local.RemoteAddr(), err)
+		logs.Error("读取数据失败 ->", local.RemoteAddr(), err)
 		return nil, err
 	}
 
 	//仅支持 socks5
 	if buf[0] != uint8(Socks5Version) {
-		ErrorLogger.Println("协议版本不正确 ->", local.RemoteAddr(), buf[0])
+		logs.Error("协议版本不正确 ->", local.RemoteAddr(), buf[0])
 		return nil, ErrVer
 	}
 
 	methodLen := int(buf[1])
 	//如果读取到的认证方式为0则说明非socks5协议
 	if methodLen <= 0 {
-		ErrorLogger.Println("解析认证方式长度失败 ->", local.RemoteAddr(), buf[1])
+		logs.Error("解析认证方式长度失败 ->", local.RemoteAddr(), buf[1])
 		return nil, ErrAuthExtraData
 	}
 
@@ -389,14 +389,14 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 		}
 	}
 	if isSupportAuth {
-		GeneralLogger.Printf("选中的认证方式 -> %d %s", method, local.RemoteAddr())
+		logs.Infof("选中的认证方式 -> %d %s", method, local.RemoteAddr())
 		//如果没有命中认证方式
 		_, err := local.Write([]byte{uint8(Socks5Version), uint8(method)})
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		GeneralLogger.Printf("不支持的认证方式 -> %d %s", buf[2:], local.RemoteAddr())
+		logs.Infof("不支持的认证方式 -> %d %s", buf[2:], local.RemoteAddr())
 		//如果没有命中认证方式
 		_, err := local.Write([]byte{uint8(Socks5Version), uint8(AuthMethodNoAcceptableMethods)})
 		if err != nil {
@@ -580,7 +580,7 @@ func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16, rawurl str
 		matched, ruleId, err := p.rule.Match(req)
 
 		if err != nil {
-			ErrorLogger.Println("匹配规则失败 ->", rawurl, err)
+			logs.Error("匹配规则失败 ->", rawurl, err)
 		} else if matched {
 			if v, ok := p.tunnel.Load(ruleId); ok {
 				if value, ok := v.(*ProxyTunnel); ok {
@@ -591,7 +591,7 @@ func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16, rawurl str
 	}
 
 	if proxy != nil {
-		GeneralLogger.Printf("通过远程代理[%s]连接服务器 -> %s --> %s", proxy.Addr, rawurl, proxy)
+		logs.Infof("通过远程代理[%s]连接服务器 -> %s --> %s", proxy.Addr, rawurl, proxy)
 		if proxy.Type == "socks5" {
 			return p.connectSocks5Server(*proxy, domain, port)
 		} else if proxy.Type == "socks4" {
@@ -607,7 +607,7 @@ func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16, rawurl str
 
 func (p *ProxyServer) connectSocks5Server(tunnel ProxyTunnel, domain string, port uint16) (conn net.Conn, err error) {
 
-	GeneralLogger.Println("正在连接远程代理服务器 ->", tunnel.Addr)
+	logs.Info("正在连接远程代理服务器 ->", tunnel.Addr)
 	conn, err = net.DialTimeout("tcp", tunnel.Addr, time.Second*30)
 	if err != nil {
 		return nil, err
@@ -650,7 +650,7 @@ func (p *ProxyServer) connectSocks5Server(tunnel ProxyTunnel, domain string, por
 		auth := &UsernamePassword{Username: tunnel.UserName, Password: tunnel.Password}
 		err = auth.Authenticate(conn, AuthMethodUsernamePassword)
 		if err != nil {
-			ErrorLogger.Println("代理认证失败 ->", conn.RemoteAddr(), err)
+			logs.Error("代理认证失败 ->", conn.RemoteAddr(), err)
 			_ = conn.Close()
 			return nil, err
 		}
@@ -766,7 +766,7 @@ func (p *ProxyServer) connectShadowsocks(rawAddr string, tunnel ProxyTunnel) (ne
 
 	cipher, err := ss.NewCipher(tunnel.UserName, tunnel.Password)
 	if err != nil {
-		log.Println("ss.NewCipher failed:", err)
+		logs.Error("ss.NewCipher failed:", err)
 		return nil, err
 	}
 
@@ -776,7 +776,7 @@ func (p *ProxyServer) connectShadowsocks(rawAddr string, tunnel ProxyTunnel) (ne
 func (p *ProxyServer) replaySocks5Client(conn net.Conn, state byte) (int, error) {
 	n, err := conn.Write([]byte{uint8(Socks5Version), state, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 	if err != nil {
-		ErrorLogger.Println("写入客户端失败 ->", conn.RemoteAddr(), err)
+		logs.Error("写入客户端失败 ->", conn.RemoteAddr(), err)
 	}
 	return n, err
 }
@@ -789,11 +789,11 @@ func (p *ProxyServer) Close() error {
 	return nil
 }
 
-func safeClose(conn net.Conn) {
+func safeClose(conn io.Closer) {
 	defer func() {
 		p := recover()
 		if p != nil {
-			ErrorLogger.Printf("panic on closing connection from  %v", p)
+			logs.Errorf("panic on closing connection from  %v", p)
 		}
 	}()
 	if conn != nil {

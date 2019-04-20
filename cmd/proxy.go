@@ -101,7 +101,7 @@ func main() {
 	Config.Listen = "127.0.0.1:8581"
 	//_, err := toml.DecodeFile("goproxy.conf", &Config)
 	//if err != nil {
-	//	log.Fatalln("DecodeFile failed:", err)
+	//	logs.Fatalln("DecodeFile failed:", err)
 	//}
 	for i, channel := range Config.Channel {
 		for j, d := range channel.Domains {
@@ -130,7 +130,7 @@ func getConnectByChannel(channel *ChannelDefine, domain string, port uint16) (ne
 	if strings.HasPrefix(channel.Type, "ss,") {
 		//parts := strings.SplitN(channel.Type, ",", 3)
 		//if len(parts) != 3 {
-		//	log.Println("Config shadowsocks failed:", channel.Type)
+		//	logs.Println("Config shadowsocks failed:", channel.Type)
 		//	return nil, false, errors.New("config_error")
 		//}
 		//
@@ -170,7 +170,7 @@ func getConnectByChannel(channel *ChannelDefine, domain string, port uint16) (ne
 //func connectShadowSocks(method, password, ssaddr string, domain string, port uint16) (net.Conn, error) {
 //	cipher, err := ss.NewCipher(method, password)
 //	if err != nil {
-//		log.Println("ss.NewCipher failed:", err)
+//		logs.Println("ss.NewCipher failed:", err)
 //		return nil, err
 //	}
 //
