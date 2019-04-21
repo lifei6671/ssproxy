@@ -5,9 +5,12 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/lifei6671/ssproxy"
 	"github.com/lifei6671/ssproxy/logs"
+	_ "github.com/mkevac/debugcharts" // 可选，添加后可以查看几个实时图表数据
 	"gopkg.in/urfave/cli.v2"
 	"io/ioutil"
 	"log"
+	"net/http"
+	_ "net/http/pprof" // 必须，引入 pprof 模块
 	"os"
 	"time"
 )
@@ -17,6 +20,17 @@ const APP_VERSION = "0.1"
 
 func main() {
 	defer logs.Flush()
+
+	if os.Getenv("debugPProf") == "true" {
+		go func() {
+			// terminal: $ go tool pprof -http=:8081 http://localhost:6060/debug/pprof/heap
+			// web:
+			// 1、http://localhost:8081/ui
+			// 2、http://localhost:6060/debug/charts
+			// 3、http://localhost:6060/debug/pprof
+			log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+		}()
+	}
 
 	proxy := ssproxy.NewProxyServer()
 
