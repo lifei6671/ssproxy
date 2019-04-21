@@ -32,6 +32,7 @@ var hopHeaders = []string{
 	"Transfer-Encoding",
 	"Upgrade",
 }
+var connect = []byte("CON")
 
 type (
 	ProxyTunnel struct {
@@ -182,7 +183,7 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 
 	// 根据请求第一个字节判断是什么类型的代理
 	// 如果发起的是HTTP代理请求
-	if bytes.Equal(buff, []byte("CON")) || (buff[0] >= 'A' && buff[0] <= 'Z') {
+	if bytes.Equal(buff, connect) || (buff[0] >= 'A' && buff[0] <= 'Z') {
 		peer, err = p.buildHttpRequest(cr, c)
 		if err != nil {
 			logs.Errorf("创建 HTTP  代理失败 -> %v", err)
@@ -295,6 +296,8 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 		logs.Error("获取响应失败 ->", err)
 		return nil, err
 	}
+	defer safeClose(res.Body)
+
 	//如果是 websocket 则不能断开连接直接返回即可
 	if res.StatusCode == http.StatusSwitchingProtocols {
 		if err := res.Write(local); err != nil {
@@ -353,7 +356,8 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	//| 1  |    1     |  1~255   |
 	//+----+----------+----------+
 	// 客户端请求的协议格式
-	buf := make([]byte, 258)
+	buf := bytesHeaderPool.Get().([]byte)
+	defer bytesHeaderPool.Put(buf)
 
 	if _, err := io.ReadFull(reader, buf[0:2]); err != nil {
 		logs.Error("读取数据失败 ->", local.RemoteAddr(), err)
@@ -380,14 +384,15 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	var method AuthMethod
 	isSupportAuth := false
 
-	for _, char := range buf[2:] {
+	for i := 2; i < methodLen+2; i++ {
 		//命中了支持的认证方式直接响应客户端
-		if AuthMethod(char) == AuthMethodNotRequired {
+		if AuthMethod(buf[i]) == AuthMethodNotRequired {
 			method = AuthMethodNotRequired
 			isSupportAuth = true
 			break
 		}
 	}
+
 	if isSupportAuth {
 		logs.Infof("选中的认证方式 -> %d %s", method, local.RemoteAddr())
 		//如果没有命中认证方式
@@ -411,7 +416,9 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 		//| 1  |   1     |   1~255  |       1      |   1~255   |
 		//+----+---------+----------+--------------+-----------+
 		// 获取用户名的长度
-		header := make([]byte, 513)
+		header := bytesHeaderPool.Get().([]byte)
+		defer bytesHeaderPool.Put(header)
+
 		if _, err := io.ReadFull(local, header[:2]); err != nil {
 			return nil, err
 		}
@@ -461,9 +468,10 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	// +----+-----+-------+------+----------+--------+
 	// |  1 |  1  |X’00’|  1   | Variable |     2    |
 	// +----+-----+-------+------+----------+--------+
-	header := make([]byte, 4)
+	header := bytesHeaderPool.Get().([]byte)
+	defer bytesHeaderPool.Put(header)
 
-	if _, err := io.ReadFull(reader, header); err != nil {
+	if _, err := io.ReadFull(reader, header[0:4]); err != nil {
 		ErrorLogger.Println("illegal request", err)
 		return nil, err
 	}
