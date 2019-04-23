@@ -1,10 +1,18 @@
 listen = ":8580"
-gfwlist=
 
 [proxy]
   [proxy.ss]
-  name=ss
-  type=ss
-  addr=
-  username
-  password
+  name="ss"
+  type="ss"
+  addr=""
+  username="aes-256-cfb"
+  password=""
+
+[rule]
+  [rule.ss]
+    [rule.ss.proxy]
+    proxy_name="ss"
+    weight=1
+    [rule.ss.condition]
+    condition_type="HostWildcardCondition"
+    pattern="*.google.com"

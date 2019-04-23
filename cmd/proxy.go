@@ -1,5 +1,6 @@
 package main
 
+// https://github.com/nybuxtsui/goproxy
 import (
 	"bufio"
 	"bytes"

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/lifei6671/ssproxy/logs"
 	"golang.org/x/time/rate"
 	"io"
 	"net"
@@ -240,7 +241,7 @@ func (conn *Socks5Conn) Forward() error {
 		}
 		return err
 	}
-	defer remoteConn.Close()
+	defer safeClose(remoteConn)
 	//+----+-----+-------+------+----------+----------+
 	//|VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
 	//+----+-----+-------+------+----------+----------+
@@ -263,10 +264,8 @@ func (conn *Socks5Conn) Forward() error {
 		return err
 	}
 	defer func() {
-		GeneralLogger.Println("正在关闭远程服务器连接 ->", remoteConn.LocalAddr())
-		if err := remoteConn.Close(); err != nil {
-			ErrorLogger.Println("关闭远程服务器失败 ->", err)
-		}
+		logs.Info("正在关闭远程服务器连接 ->", remoteConn.LocalAddr())
+		safeClose(remoteConn)
 	}()
 
 	GeneralLogger.Printf("开始转换数据 -> %s ---> %s", conn.RemoteAddr(), remoteConn.RemoteAddr())

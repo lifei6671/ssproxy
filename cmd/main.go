@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"github.com/BurntSushi/toml"
 	"github.com/lifei6671/ssproxy"
 	"github.com/lifei6671/ssproxy/logs"
-	_ "github.com/mkevac/debugcharts" // 可选，添加后可以查看几个实时图表数据
 	"gopkg.in/urfave/cli.v2"
 	"io/ioutil"
 	"log"
@@ -21,16 +21,7 @@ const APP_VERSION = "0.1"
 func main() {
 	defer logs.Flush()
 
-	if os.Getenv("debugPProf") == "true" {
-		go func() {
-			// terminal: $ go tool pprof -http=:8081 http://localhost:6060/debug/pprof/heap
-			// web:
-			// 1、http://localhost:8081/ui
-			// 2、http://localhost:6060/debug/charts
-			// 3、http://localhost:6060/debug/pprof
-			log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
-		}()
-	}
+	Run()
 
 	proxy := ssproxy.NewProxyServer()
 
@@ -81,6 +72,18 @@ type (
 	}
 )
 
+func (p *ProxyConfig) String() string {
+	if p == nil {
+		return ""
+	}
+	buf := bytes.NewBufferString("")
+
+	if err := toml.NewEncoder(buf).Encode(p); err == nil {
+		return buf.String()
+	}
+	return ""
+}
+
 func Run() {
 	app := &cli.App{}
 	app.Name = "ssproxy"
@@ -109,13 +112,23 @@ var start = &cli.Command{
 		&cli.StringFlag{
 			Name:    "config",
 			Aliases: []string{"f"},
-			Value:   "./config/config.conf",
+			Value:   "./config/config.toml",
 			Usage:   "配置文件路径",
 		},
 		&cli.StringFlag{
 			Name:  "addr",
 			Value: ":8580",
 			Usage: "本地监听的地址和端口号：127.0.0.1:8580",
+		},
+		&cli.BoolFlag{
+			Name:  "pprof",
+			Value: false,
+			Usage: "是否开启 pprof 模块",
+		},
+		&cli.StringFlag{
+			Name:  "pprof_addr",
+			Value: "127.0.0.1:6060",
+			Usage: "pprof 模块监听地址和端口号",
 		},
 	},
 	Action: func(ctx *cli.Context) error {
@@ -128,7 +141,15 @@ var start = &cli.Command{
 				logs.Error("解析配置失败 ->", err)
 				os.Exit(-1)
 			}
+			log.Fatal(config)
+		}
 
+		if ctx.Bool("pprof") {
+			go func() {
+				if err := http.ListenAndServe(ctx.String("pprof_addr"), nil); err != nil {
+					logs.Error(err)
+				}
+			}()
 		}
 
 		return nil

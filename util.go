@@ -1,6 +1,8 @@
 package ssproxy
 
 import (
+	"github.com/lifei6671/ssproxy/logs"
+	"io"
 	"net/http"
 	"strings"
 	"unicode/utf8"
@@ -66,5 +68,18 @@ func removeConnectionHeaders(h http.Header) {
 				h.Del(f)
 			}
 		}
+	}
+}
+
+// safeClose 安全的关闭
+func safeClose(conn io.Closer) {
+	defer func() {
+		p := recover()
+		if p != nil {
+			logs.Errorf("panic on closing connection from  %v", p)
+		}
+	}()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }

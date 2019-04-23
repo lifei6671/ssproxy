@@ -192,11 +192,9 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 	} else if buff[0] == uint8(Socks5Version) {
 		peer, err = p.buildSocksRequest(cr, c)
 		if err != nil {
-			ErrorLogger.Println(err)
+			logs.Error(err)
 			return err
 		}
-	} else if buff[0] == uint8(Socks4Version) {
-
 	} else {
 		return fmt.Errorf("未知的协议 -> %v", buff)
 	}
@@ -223,12 +221,13 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 
 	logs.Info("正在转换数据 ->", peer.RemoteAddr(), c.RemoteAddr())
 	go func() {
-		_, _ = NewPipeline(time.Second*30000, time.Second*30).Pipe(peer, c, nil)
+		_, _ = Pipe(peer, c, nil)
 	}()
-	_, _ = NewPipeline(time.Second*300000, time.Second*30).Pipe(c, peer, nil)
+	_, _ = Pipe(c, peer, nil)
 	return nil
 }
 
+// buildHttpRequest 处理普通  HTTP 代理请求
 func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (net.Conn, error) {
 	req, err := http.ReadRequest(reader)
 
@@ -236,6 +235,12 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 		logs.Errorf("读取请求失败 -> %s %s", local.RemoteAddr(), err)
 		return nil, err
 	}
+	if req.RequestURI == "http://ssproxy/proxy.pac" {
+
+	} else if req.RequestURI == "http://ssproxy/android.pac" {
+
+	}
+
 	logs.Infof("解析请求 -> %s -- %s -- %s", req.Method, req.RequestURI, local.RemoteAddr())
 	//如果是 Connect 连接，则直接打洞
 	if req.Method == http.MethodConnect {
@@ -320,6 +325,7 @@ func (p *ProxyServer) buildHttpRequest(reader *bufio.Reader, local net.Conn) (ne
 	return conn, nil
 }
 
+// buildHttpConnectRequest 处理 https 发起的 connect 连接
 func (p *ProxyServer) buildHttpConnectRequest(req *http.Request, local net.Conn) (conn net.Conn, err error) {
 	domain, _port, err1 := net.SplitHostPort(req.Host)
 	if err1 != nil {
@@ -607,12 +613,13 @@ func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16, rawurl str
 		} else if proxy.Type == "http" {
 			return p.connectSocks4Server(*proxy)
 		} else if proxy.Type == "ss" {
-			return p.connectShadowsocks(fmt.Sprintf("%s:%d", domain, port), *proxy)
+			return p.connectShadowSocks(fmt.Sprintf("%s:%d", domain, port), *proxy)
 		}
 	}
 	return net.DialTimeout("tcp", fmt.Sprintf("%s:%v", domain, port), time.Second*30)
 }
 
+// connectSocks5Server 连接远程 socks5 服务器
 func (p *ProxyServer) connectSocks5Server(tunnel ProxyTunnel, domain string, port uint16) (conn net.Conn, err error) {
 
 	logs.Info("正在连接远程代理服务器 ->", tunnel.Addr)
@@ -763,14 +770,11 @@ func (p *ProxyServer) connectSocks5Server(tunnel ProxyTunnel, domain string, por
 }
 
 func (p *ProxyServer) connectSocks4Server(tunnel ProxyTunnel) (conn net.Conn, err error) {
-	return
+	return nil, ErrVer
 }
 
-func (p *ProxyServer) connectHttpServer(tunnel ProxyTunnel) (conn net.Conn, err error) {
-	return
-}
-
-func (p *ProxyServer) connectShadowsocks(rawAddr string, tunnel ProxyTunnel) (net.Conn, error) {
+// connectShadowSocks 连接到远程 SS 服务器
+func (p *ProxyServer) connectShadowSocks(rawAddr string, tunnel ProxyTunnel) (net.Conn, error) {
 
 	cipher, err := ss.NewCipher(tunnel.UserName, tunnel.Password)
 	if err != nil {
@@ -795,16 +799,4 @@ func (p *ProxyServer) Close() error {
 	}
 	p.closed = true
 	return nil
-}
-
-func safeClose(conn io.Closer) {
-	defer func() {
-		p := recover()
-		if p != nil {
-			logs.Errorf("panic on closing connection from  %v", p)
-		}
-	}()
-	if conn != nil {
-		_ = conn.Close()
-	}
 }
