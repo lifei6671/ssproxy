@@ -16,6 +16,8 @@ github.com/golang/time v0.0.0-20190308202827-9d24e82272b4 h1:F9e5QAps6/3zc8881Jh
 github.com/golang/time v0.0.0-20190308202827-9d24e82272b4/go.mod h1:tRJNPiyCQ0inRvYxbN9jk5I+vvW/OXSQhTDSoE431IQ=
 github.com/gorilla/websocket v1.4.0 h1:WDFjx/TMzVgy9VdMMQi2K2Emtwi2QcUQsztZ/zLaH/Q=
 github.com/gorilla/websocket v1.4.0/go.mod h1:E7qHFY5m1UJ88s3WnNqhKjPHQ0heANvMoAMk2YaljkQ=
+github.com/howeyc/fsnotify v0.9.0 h1:0gtV5JmOKH4A8SsFxG2BczSeXWWPvcMT0euZt5gDAxY=
+github.com/howeyc/fsnotify v0.9.0/go.mod h1:41HzSPxBGeFRQKEEwgh49TRw/nKBsYZ2cF1OzPjSJsA=
 github.com/mkevac/debugcharts v0.0.0-20180124214838-d3203a8fa926 h1:RO2b3nhIiwFODArkkZZeWjduc4/krjJp516w/wp2kKc=
 github.com/mkevac/debugcharts v0.0.0-20180124214838-d3203a8fa926/go.mod h1:DFtsJNc3AsN/BqWzur7rmLJI+fr7L6owUVZuvkNv1Oc=
 github.com/pkg/errors v0.8.1 h1:iURUrRGxPUNPdy5/HRSm+Yj6okJ6UtLINN0Q9M4+h3I=

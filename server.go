@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"github.com/lifei6671/ssproxy/logs"
@@ -34,20 +33,6 @@ var hopHeaders = []string{
 }
 var connect = []byte("CON")
 
-type (
-	ProxyTunnel struct {
-		Name     string `toml:"name" json:"name"`
-		Type     string `toml:"type" json:"type"`
-		Addr     string `toml:"addr" json:"addr"`
-		UserName string `toml:"username" json:"username"`
-		Password string `toml:"password" json:"password"`
-	}
-)
-
-func (proxy *ProxyTunnel) String() string {
-	return fmt.Sprintf("name:%s - addr:%s - type:%s - username:%s", proxy.Name, proxy.Addr, proxy.Type, proxy.UserName)
-}
-
 type ProxyServer struct {
 	done         <-chan struct{}
 	cancel       func()
@@ -66,52 +51,24 @@ func NewProxyServer() *ProxyServer {
 }
 
 func (p *ProxyServer) SetDeadline(duration time.Duration) *ProxyServer {
+	if p.closed {
+		panic(ErrProxyClosed)
+	}
 	p.ReadTimeout = duration
 	p.WriteTimeout = duration
 	return p
 }
 
-func (p *ProxyServer) AddRouter(s string, tunnel *ProxyTunnel) error {
-	rule, err := ParseRule(s)
-	if err != nil {
-		logs.Error("解析规则失败 ->", s, err)
-		return err
+func (p *ProxyServer) AddRule(route *ProxyRoute) error {
+	if p.closed {
+		return ErrProxyClosed
 	}
-
 	ruleId := int(atomic.AddInt32(&(p.ruleId), 1))
 	if _, ok := p.tunnel.Load(ruleId); ok {
 		logs.Debug("Rule Id 已被使用 ->", ruleId)
 	}
-	p.tunnel.Store(ruleId, tunnel)
-	return p.rule.AddRule(rule, ruleId)
-}
-
-func (p *ProxyServer) AddRouteFromGFWList(rawurl string, tunnel *ProxyTunnel) error {
-	resp, err := http.Get(rawurl)
-
-	if err != nil {
-		return err
-	}
-	defer safeClose(resp.Body)
-	decoder := base64.NewDecoder(base64.StdEncoding, resp.Body)
-
-	reader := bufio.NewReader(decoder)
-
-	for {
-		line, _, err := reader.ReadLine()
-		if err != nil {
-			if err != io.EOF {
-				logs.Error("读取 GFW 规则失败 ->", err)
-			}
-			break
-		}
-		if len(line) > 0 && !bytes.HasPrefix(line, []byte("!")) {
-			if err := p.AddRouter(string(line), tunnel); err != nil {
-				logs.Error("解析GFW规则失败 ->", string(line), err)
-			}
-		}
-	}
-	return nil
+	p.tunnel.Store(ruleId, route)
+	return p.rule.AddRule(route.Rule, ruleId)
 }
 
 // AddConnectionWrappers 增加连接的包装器
@@ -563,7 +520,7 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	} else {
 		return nil, ErrAddrType
 	}
-	GeneralLogger.Printf("通过 Socks 方式连接 -> %s ---> %s:%d", local.RemoteAddr(), addr, port)
+	logs.Infof("通过 Socks 方式连接 -> %s ---> %s:%d", local.RemoteAddr(), addr, port)
 	conn, err := p.selectSuperiorProxy(addr, port, addr)
 
 	if err != nil {
@@ -597,8 +554,17 @@ func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16, rawurl str
 			logs.Error("匹配规则失败 ->", rawurl, err)
 		} else if matched {
 			if v, ok := p.tunnel.Load(ruleId); ok {
-				if value, ok := v.(*ProxyTunnel); ok {
-					proxy = value
+				if value, ok := v.(*ProxyRoute); ok {
+					if len(value.Channel) > 0 {
+						index := int(time.Now().Unix() % int64(len(value.Channel)))
+						for _, p := range value.Channel {
+							if index != 0 {
+								index--
+								continue
+							}
+							proxy = p
+						}
+					}
 				}
 			}
 		}
@@ -794,9 +760,12 @@ func (p *ProxyServer) replaySocks5Client(conn net.Conn, state byte) (int, error)
 }
 
 func (p *ProxyServer) Close() error {
-	if p.cancel != nil {
-		p.cancel()
+	if !p.closed {
+		if p.cancel != nil {
+			p.cancel()
+		}
+		p.closed = true
+		return nil
 	}
-	p.closed = true
-	return nil
+	return ErrProxyClosed
 }

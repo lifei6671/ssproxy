@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"github.com/BurntSushi/toml"
+	"github.com/howeyc/fsnotify"
 	"github.com/lifei6671/ssproxy"
 	"github.com/lifei6671/ssproxy/logs"
 	"gopkg.in/urfave/cli.v2"
@@ -12,7 +12,6 @@ import (
 	"net/http"
 	_ "net/http/pprof" // 必须，引入 pprof 模块
 	"os"
-	"time"
 )
 
 const defaultGFWListURL = "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
@@ -22,66 +21,6 @@ func main() {
 	defer logs.Flush()
 
 	Run()
-
-	proxy := ssproxy.NewProxyServer()
-
-	proxy.SetDeadline(time.Second * 30)
-	go func() {
-		tunnel := &ssproxy.ProxyTunnel{Name: "ss", UserName: "aes-256-cfb", Password: "_hvolZ8H-mZ_bTar", Type: "ss", Addr: "la1533.256ss.com:32318"}
-		if err := proxy.AddRouteFromGFWList(defaultGFWListURL, tunnel); err != nil {
-			log.Fatal("添加路由失败 ->", err)
-		}
-	}()
-
-	defer func() {
-		_ = proxy.Close()
-	}()
-
-	if err := proxy.Listen(context.Background(), "tcp", "127.0.0.1:8580"); err != nil {
-		log.Fatal(err)
-	}
-}
-
-type (
-	ProxyConfig struct {
-		Listen string                 `toml:"listen"`
-		Proxy  map[string]ProxyTunnel `toml:"proxy"`
-		Rules  []Rule                 `toml:"rules"`
-	}
-	ProxyTunnel struct {
-		Name     string `toml:"name" json:"name"`
-		Type     string `toml:"type" json:"type"`
-		Addr     string `toml:"addr" json:"addr"`
-		UserName string `toml:"username" json:"username"`
-		Password string `toml:"password" json:"password"`
-	}
-	Rule struct {
-		//支持多个代理负载均衡
-		Proxy []struct {
-			//代理名称
-			ProxyName string `toml:"proxy_name"`
-			//权重，权重越高流量越大
-			Weight int `toml:"weight" json:"weight"`
-		} `toml:"proxy" json:"proxy"`
-		//匹配规则
-		Condition struct {
-			//规则类型：如果是 GFW 则 Pattern 指定的是 GFWList 获取地址，默认 HostWildcardCondition 规则统配，HostRegexCondition：域名正则
-			ConditionType string `toml:"condition_type" json:"condition_type"`
-			Pattern       string `toml:"pattern" json:"pattern"`
-		} `toml:"condition" json:"condition"`
-	}
-)
-
-func (p *ProxyConfig) String() string {
-	if p == nil {
-		return ""
-	}
-	buf := bytes.NewBufferString("")
-
-	if err := toml.NewEncoder(buf).Encode(p); err == nil {
-		return buf.String()
-	}
-	return ""
 }
 
 func Run() {
@@ -135,13 +74,14 @@ var start = &cli.Command{
 
 		configFile := ctx.String("config")
 
+		var config ssproxy.ProxyConfig
+
 		if b, err := ioutil.ReadFile(configFile); err == nil {
-			var config ProxyConfig
+
 			if _, err := toml.Decode(string(b), &config); err != nil {
 				logs.Error("解析配置失败 ->", err)
-				os.Exit(-1)
+				return err
 			}
-			log.Fatal(config)
 		}
 
 		if ctx.Bool("pprof") {
@@ -152,6 +92,70 @@ var start = &cli.Command{
 			}()
 		}
 
+		proxy := ssproxy.NewProxyServer()
+
+		go func() {
+			_ = loadConfig(proxy, configFile)
+			watcher, err := fsnotify.NewWatcher()
+			if err != nil {
+				logs.Error("创建文件监视器失败 ->", err)
+				return
+			}
+			go func() {
+				for {
+					select {
+					case ev := <-watcher.Event:
+						//如果是修改了配置文件
+						if ev.IsModify() {
+							_ = loadConfig(proxy, configFile)
+							logs.Info("配置文件已加载 ->", configFile)
+						} else if ev.IsRename() {
+							watcher.WatchFlags(configFile, fsnotify.FSN_MODIFY|fsnotify.FSN_RENAME)
+						}
+					case err := <-watcher.Error:
+						logs.Error("配置文件监控器错误 ->", err)
+
+					}
+				}
+			}()
+
+			err = watcher.WatchFlags(configFile, fsnotify.FSN_MODIFY|fsnotify.FSN_RENAME)
+
+			if err != nil {
+				logs.Error("监控配置文件失败 ->", err)
+			}
+		}()
+
+		defer func() {
+			_ = proxy.Close()
+		}()
+
+		if err := proxy.Listen(context.Background(), "tcp", config.Listen); err != nil {
+			log.Fatal(err)
+		}
 		return nil
 	},
+}
+
+func loadConfig(proxy *ssproxy.ProxyServer, configFile string) error {
+	var config ssproxy.ProxyConfig
+
+	if b, err := ioutil.ReadFile(configFile); err == nil {
+
+		if _, err := toml.Decode(string(b), &config); err != nil {
+			logs.Error("解析配置失败 ->", err)
+			return err
+		}
+	}
+	routes, err := config.Resolve()
+	if err != nil {
+		log.Fatal("解析路由规则失败 ->", err)
+	}
+	logs.Info("路由规则解析完成 ->", len(routes))
+	for _, route := range routes {
+		if err := proxy.AddRule(route); err != nil {
+			logs.Warn("加入规则失败 ->", err)
+		}
+	}
+	return nil
 }

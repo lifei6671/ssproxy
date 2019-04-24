@@ -1,18 +1,19 @@
 listen = ":8580"
 
+#GFW规则获取地址
+gfw_list="https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
+#GFW规则使用的代理名称
+gfw_proxy=["shadowsocks"]
+
 [proxy]
-  [proxy.ss]
-  name="ss"
-  type="ss"
-  addr=""
-  username="aes-256-cfb"
-  password=""
+    [proxy.shadowsocks]
+    name="shadowsocks"
+    type="ss"
+    addr=""
+    username=""
+    password=""
 
 [rule]
-  [rule.ss]
-    [rule.ss.proxy]
-    proxy_name="ss"
-    weight=1
-    [rule.ss.condition]
+    [rule.shadowsocks]
     condition_type="HostWildcardCondition"
-    pattern="*.google.com"
+    pattern=["*.google.com","*.d2pass.com"]

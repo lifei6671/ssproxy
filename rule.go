@@ -251,7 +251,7 @@ func ParseRule(s string) (*Rule, error) {
 // ParseRules returns the sequence of rules extracted from supplied reader
 // content.
 func ParseRules(r io.Reader) ([]*Rule, error) {
-	rules := []*Rule{}
+	var rules []*Rule
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		r, err := ParseRule(scanner.Text())

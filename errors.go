@@ -17,5 +17,6 @@ var (
 	ErrDomainForbidConnect    = errors.New("forbid domain connect")
 	ErrUserAuthFailed         = errors.New("socks user authentication failed")
 	ErrUnrecognizedAddrType   = errors.New("socks unrecognized address type")
-	ErrEmptyPassword          = errors.New("")
+	ErrEmptyPassword          = errors.New("socks authentication password is empty")
+	ErrProxyClosed            = errors.New("proxy server closed")
 )
