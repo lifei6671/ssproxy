@@ -7,8 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"github.com/lifei6671/ssproxy/logs"
-	"github.com/pkg/errors"
-	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
 	"golang.org/x/time/rate"
 	"io"
 	"net"
@@ -40,14 +38,16 @@ type ProxyServer struct {
 	Authenticate PasswordHandle
 	tunnel       *sync.Map
 	rule         *RuleMatcher
+	blacklist    *RuleMatcher
 	ruleId       int32
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	closed       bool
+	defaultProxy *ProxyTunnel
 }
 
 func NewProxyServer() *ProxyServer {
-	return &ProxyServer{tunnel: &sync.Map{}, rule: NewMatcher()}
+	return &ProxyServer{tunnel: &sync.Map{}, rule: NewMatcher(), blacklist: NewMatcher()}
 }
 
 func (p *ProxyServer) SetDeadline(duration time.Duration) *ProxyServer {
@@ -69,6 +69,19 @@ func (p *ProxyServer) AddRule(route *ProxyRoute) error {
 	}
 	p.tunnel.Store(ruleId, route)
 	return p.rule.AddRule(route.Rule, ruleId)
+}
+
+// AddBlack 增加一条黑名单规则
+func (p *ProxyServer) AddBlack(rule *Rule) error {
+	if p.closed {
+		return ErrProxyClosed
+	}
+	ruleId := int(atomic.AddInt32(&(p.ruleId), 1))
+	return p.blacklist.AddRule(rule, ruleId)
+}
+
+func (p *ProxyServer) SetDefaultProxy(tunnel *ProxyTunnel) {
+	p.defaultProxy = tunnel
 }
 
 // AddConnectionWrappers 增加连接的包装器
@@ -149,7 +162,6 @@ func (p *ProxyServer) doProxy(c net.Conn) error {
 	} else if buff[0] == uint8(Socks5Version) {
 		peer, err = p.buildSocksRequest(cr, c)
 		if err != nil {
-			logs.Error(err)
 			return err
 		}
 	} else {
@@ -507,7 +519,7 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	if err := binary.Read(reader, binary.BigEndian, &port); err != nil {
 		ErrorLogger.Println("read socks port error ", err)
 		if _, err := p.replaySocks5Client(local, 0x08); err != nil {
-			ErrorLogger.Println("写入客户端失败 ->", local.RemoteAddr(), err)
+			logs.Error("写入客户端失败 ->", local.RemoteAddr(), err)
 		}
 		return nil, err
 	}
@@ -524,15 +536,14 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 	conn, err := p.selectSuperiorProxy(addr, port, addr)
 
 	if err != nil {
-		ErrorLogger.Printf("连接远程服务器失败 -> %s:%d", addr, port)
-		safeClose(conn)
+		logs.Errorf("连接远程服务器失败 -> %s:%d", addr, port)
 		if _, err := p.replaySocks5Client(local, 0x03); err != nil {
 			ErrorLogger.Printf("写入客户端失败 -> %s:%d - %s", addr, port, err)
 		}
 		return nil, err
 	}
 	if _, err := p.replaySocks5Client(local, uint8(StatusSucceeded)); err != nil {
-		ErrorLogger.Println("写入客户端失败 ->", conn.RemoteAddr(), err)
+		logs.Errorf("写入客户端失败 ->%s %v", conn.RemoteAddr(), err)
 		safeClose(conn)
 		return nil, err
 	}
@@ -542,213 +553,56 @@ func (p *ProxyServer) buildSocksRequest(reader *bufio.Reader, local net.Conn) (n
 
 // selectSuperiorProxy 选中一个远程代理
 func (p *ProxyServer) selectSuperiorProxy(domain string, port uint16, rawurl string) (conn net.Conn, err error) {
-	var proxy *ProxyTunnel
 
+	host := fmt.Sprintf("%s:%v", domain, port)
 	if rawurl != "" {
 		req := &Request{
 			URL: rawurl,
 		}
-		matched, ruleId, err := p.rule.Match(req)
+		if matched, ruleId, _ := p.blacklist.Match(req); matched {
+			logs.Warnf("匹配到黑名单 -> Addr:%s;RuleId: %d", rawurl, ruleId)
+			return nil, ErrDomainForbidConnect
+		}
+		matched, ruleId, err1 := p.rule.Match(req)
 
-		if err != nil {
+		if err1 != nil {
 			logs.Error("匹配规则失败 ->", rawurl, err)
 		} else if matched {
 			if v, ok := p.tunnel.Load(ruleId); ok {
 				if value, ok := v.(*ProxyRoute); ok {
 					if len(value.Channel) > 0 {
-						index := int(time.Now().Unix() % int64(len(value.Channel)))
-						for _, p := range value.Channel {
-							if index != 0 {
-								index--
-								continue
+						for _, proxy := range value.Channel {
+							logs.Infof("通过远程代理[%s]连接服务器 -> %s --> %s", proxy.Addr, rawurl, proxy)
+							conn, err = proxy.DialTimeout("tcp", host, time.Second*5)
+							if err != nil {
+								//如果连接超时，则继续下一个代理
+								if err1, ok := err.(net.Error); ok && err1.Timeout() {
+									logs.Warn("代理连接超时 ->", proxy.String())
+									continue
+								}
+								return
+							} else {
+								return
 							}
-							proxy = p
 						}
+						logs.Warn("所有代理都连接失败 ->", rawurl)
 					}
 				}
 			}
 		}
 	}
 
-	if proxy != nil {
-		logs.Infof("通过远程代理[%s]连接服务器 -> %s --> %s", proxy.Addr, rawurl, proxy)
-		if proxy.Type == "socks5" {
-			return p.connectSocks5Server(*proxy, domain, port)
-		} else if proxy.Type == "socks4" {
-			return p.connectSocks4Server(*proxy)
-		} else if proxy.Type == "http" {
-			return p.connectSocks4Server(*proxy)
-		} else if proxy.Type == "ss" {
-			return p.connectShadowSocks(fmt.Sprintf("%s:%d", domain, port), *proxy)
+	conn, err = net.DialTimeout("tcp", host, time.Second*5)
+
+	if err != nil {
+		if err1, ok := err.(net.Error); ok && err1.Timeout() && p.defaultProxy != nil {
+			logs.Warn("远程服务器连接超时 ->", host)
+			conn, err = p.defaultProxy.DialTimeout("tcp", host, time.Second*5)
+		} else {
+			logs.Errorf("远程服务器连接错误 -> %s;%v", host, err)
 		}
 	}
-	return net.DialTimeout("tcp", fmt.Sprintf("%s:%v", domain, port), time.Second*30)
-}
-
-// connectSocks5Server 连接远程 socks5 服务器
-func (p *ProxyServer) connectSocks5Server(tunnel ProxyTunnel, domain string, port uint16) (conn net.Conn, err error) {
-
-	logs.Info("正在连接远程代理服务器 ->", tunnel.Addr)
-	conn, err = net.DialTimeout("tcp", tunnel.Addr, time.Second*30)
-	if err != nil {
-		return nil, err
-	}
-	//+----+----------+----------+
-	//|VER | NMETHODS | METHODS  |
-	//+----+----------+----------+
-	//| 1  |    1     |  1~255   |
-	//+----+----------+----------+
-	// 客户端请求的协议格式
-	b := make([]byte, 3)
-	b[0] = uint8(Socks5Version)
-	b[1] = 0x01
-	//如果有用户名和密码则认为是账号认证
-	if tunnel.UserName != "" && tunnel.Password != "" {
-		b[2] = uint8(AuthMethodUsernamePassword)
-	} else {
-		b[2] = uint8(AuthMethodNotRequired)
-	}
-	_, err = conn.Write(b)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	//+----+--------+
-	//|VER | METHOD |
-	//+----+--------+
-	//| 1  |   1    |
-	//+----+--------+
-	_, err = io.ReadFull(conn, b[:2])
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	if b[1] == uint8(AuthMethodNoAcceptableMethods) {
-		_ = conn.Close()
-		return nil, ErrNoSupportedAuth
-	}
-	if b[1] == uint8(AuthMethodUsernamePassword) {
-		auth := &UsernamePassword{Username: tunnel.UserName, Password: tunnel.Password}
-		err = auth.Authenticate(conn, AuthMethodUsernamePassword)
-		if err != nil {
-			logs.Error("代理认证失败 ->", conn.RemoteAddr(), err)
-			_ = conn.Close()
-			return nil, err
-		}
-	}
-	// +----+-----+-------+------+----------+--------+
-	// |VER | CMD | RSV | ATYP | DST.ADDR | DST.PORT |
-	// +----+-----+-------+------+----------+--------+
-	// |  1 |  1  |X’00’|  1   | Variable |     2    |
-	// +----+-----+-------+------+----------+--------+
-	b = []byte{uint8(Socks5Version), uint8(CmdConnect), 0x00}
-
-	ip := net.ParseIP(domain)
-	if ip == nil {
-		b = append(b, AddrTypeFQDN, uint8(len(domain)))
-	} else if len(ip) == 4 {
-		b = append(b, AddrTypeIPv4)
-	} else {
-		b = append(b, AddrTypeIPv6)
-	}
-	b = append(b, domain...)
-	index := len(b)
-
-	b = append(b, 0, 0)
-	binary.BigEndian.PutUint16(b[index:], uint16(port))
-
-	_, err = conn.Write(b)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	//+----+-----+-------+------+----------+----------+
-	//|VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
-	//+----+-----+-------+------+----------+----------+
-	//| 1  |  1  |   1   |  1   | Variable |    2     |
-	//+----+-----+-------+------+----------+----------+
-	//- REP : 返回值
-	//- 0x00 : succeeded
-	//- 0x01 : general SOCKS server failure
-	//- 0x02 : connection not allowed by ruleset
-	//- 0x03 : Network unreachable
-	//- 0x04 : Host unreachable
-	//- 0x05 : Connection refused
-	//- 0x06 : TTL expired
-	//- 0x07 : Command not supported
-	//- 0x08 : Address type not supported
-	//- 0x09-0xFF : unassigned
-	_, err = conn.Read(b[0:4])
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	if b[0] != uint8(Socks5Version) {
-		_ = conn.Close()
-		return nil, ErrVer
-	}
-
-	if b[1] != 0 {
-		_ = conn.Close()
-		switch b[1] {
-		case 1:
-			return nil, errors.New("socks5 general SOCKS server failure")
-		case 2:
-			return nil, errors.New("socks5 connection not allowed by ruleset")
-		case 3:
-			return nil, errors.New("socks5 Network unreachable")
-		case 4:
-			return nil, errors.New("socks5 Host unreachable")
-		case 5:
-			return nil, errors.New("socks5 Connection refused")
-		case 6:
-			return nil, errors.New("socks5 TTL expired")
-		case 7:
-			return nil, errors.New("socks5 Command not supported")
-		case 8:
-			return nil, errors.New("socks5 Address type not supported")
-		default:
-			return nil, fmt.Errorf("socks5 Unknown eerror: %d", b[1])
-		}
-	}
-	addrLen := 0
-	switch b[3] {
-	case AddrTypeFQDN:
-		_, err = conn.Read(b[4:5])
-		if err != nil {
-			_ = conn.Close()
-			return nil, err
-		}
-		addrLen = int(b[4])
-
-	case AddrTypeIPv4:
-		addrLen = 4
-	case AddrTypeIPv6:
-		addrLen = 16
-	}
-	_, err = conn.Read(b[4 : addrLen+4+2])
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-
 	return
-}
-
-func (p *ProxyServer) connectSocks4Server(tunnel ProxyTunnel) (conn net.Conn, err error) {
-	return nil, ErrVer
-}
-
-// connectShadowSocks 连接到远程 SS 服务器
-func (p *ProxyServer) connectShadowSocks(rawAddr string, tunnel ProxyTunnel) (net.Conn, error) {
-
-	cipher, err := ss.NewCipher(tunnel.UserName, tunnel.Password)
-	if err != nil {
-		logs.Error("ss.NewCipher failed:", err)
-		return nil, err
-	}
-
-	return ss.Dial(rawAddr, tunnel.Addr, cipher.Copy())
 }
 
 func (p *ProxyServer) replaySocks5Client(conn net.Conn, state byte) (int, error) {
@@ -759,6 +613,7 @@ func (p *ProxyServer) replaySocks5Client(conn net.Conn, state byte) (int, error)
 	return n, err
 }
 
+// Close 关闭代理服务
 func (p *ProxyServer) Close() error {
 	if !p.closed {
 		if p.cancel != nil {

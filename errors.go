@@ -19,4 +19,5 @@ var (
 	ErrUnrecognizedAddrType   = errors.New("socks unrecognized address type")
 	ErrEmptyPassword          = errors.New("socks authentication password is empty")
 	ErrProxyClosed            = errors.New("proxy server closed")
+	ErrNoSupportedProxyType   = errors.New("no supported proxy type")
 )

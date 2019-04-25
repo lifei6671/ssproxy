@@ -3,10 +3,12 @@ listen = ":8580"
 #GFW规则获取地址
 gfw_list="https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
 #GFW规则使用的代理名称
-gfw_proxy=["shadowsocks"]
+gfw_proxy=["default"]
+#黑名单列表,黑名单会禁止联网
+blacklist=["*.baidu.com"]
 
 [proxy]
-    [proxy.shadowsocks]
+    [proxy.default]
     name="shadowsocks"
     type="ss"
     addr=""
@@ -14,6 +16,6 @@ gfw_proxy=["shadowsocks"]
     password=""
 
 [rule]
-    [rule.shadowsocks]
+    [rule.default]
     condition_type="HostWildcardCondition"
     pattern=["*.google.com","*.d2pass.com"]

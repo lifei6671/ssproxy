@@ -12,6 +12,7 @@ import (
 	"net/http"
 	_ "net/http/pprof" // 必须，引入 pprof 模块
 	"os"
+	"path/filepath"
 )
 
 const defaultGFWListURL = "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
@@ -20,10 +21,6 @@ const APP_VERSION = "0.1"
 func main() {
 	defer logs.Flush()
 
-	Run()
-}
-
-func Run() {
 	app := &cli.App{}
 	app.Name = "ssproxy"
 	app.Usage = "A proxy tool"
@@ -35,6 +32,7 @@ func Run() {
 	if err != nil {
 		log.Fatalf("启动命令行失败 -> %s", err)
 	}
+
 }
 
 var start = &cli.Command{
@@ -73,6 +71,14 @@ var start = &cli.Command{
 	Action: func(ctx *cli.Context) error {
 
 		configFile := ctx.String("config")
+		if configFile != "" {
+			if p, err := filepath.Abs(configFile); err != nil {
+				logs.Error("解析配置文件路径失败 ->", err)
+				return err
+			} else {
+				configFile = p
+			}
+		}
 
 		var config ssproxy.ProxyConfig
 
@@ -96,34 +102,7 @@ var start = &cli.Command{
 
 		go func() {
 			_ = loadConfig(proxy, configFile)
-			watcher, err := fsnotify.NewWatcher()
-			if err != nil {
-				logs.Error("创建文件监视器失败 ->", err)
-				return
-			}
-			go func() {
-				for {
-					select {
-					case ev := <-watcher.Event:
-						//如果是修改了配置文件
-						if ev.IsModify() {
-							_ = loadConfig(proxy, configFile)
-							logs.Info("配置文件已加载 ->", configFile)
-						} else if ev.IsRename() {
-							watcher.WatchFlags(configFile, fsnotify.FSN_MODIFY|fsnotify.FSN_RENAME)
-						}
-					case err := <-watcher.Error:
-						logs.Error("配置文件监控器错误 ->", err)
-
-					}
-				}
-			}()
-
-			err = watcher.WatchFlags(configFile, fsnotify.FSN_MODIFY|fsnotify.FSN_RENAME)
-
-			if err != nil {
-				logs.Error("监控配置文件失败 ->", err)
-			}
+			_ = watcherConfigFile(proxy, configFile)
 		}()
 
 		defer func() {
@@ -155,6 +134,55 @@ func loadConfig(proxy *ssproxy.ProxyServer, configFile string) error {
 	for _, route := range routes {
 		if err := proxy.AddRule(route); err != nil {
 			logs.Warn("加入规则失败 ->", err)
+		}
+	}
+	if rules, err := config.ResolveBlacklist(); err != nil {
+		logs.Error("解析黑名单失败 ->", err)
+	} else {
+		logs.Info("黑名单解析完成 ->", len(rules))
+		for _, rule := range rules {
+			if err := proxy.AddBlack(rule); err != nil {
+				logs.Error("添加黑名单失败 ->", err)
+			}
+		}
+	}
+	return nil
+}
+
+func watcherConfigFile(proxy *ssproxy.ProxyServer, configFile string) error {
+	//创建一个配置文件监视器
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logs.Error("创建文件监视器失败 ->", err)
+		return err
+	} else {
+		go func() {
+			defer func() {
+				if err := watcher.Close(); err != nil {
+					logs.Error("关闭监视器失败 ->", err)
+				}
+			}()
+			for {
+				select {
+				case ev := <-watcher.Event:
+					logs.Info(ev.String())
+					//如果是修改了配置文件
+					if ev.IsModify() || ev.IsRename() {
+						_ = loadConfig(proxy, configFile)
+						logs.Info("配置文件已加载 ->", configFile)
+					}
+				case err := <-watcher.Error:
+					logs.Error("配置文件监控器错误 ->", err)
+					return
+				}
+			}
+		}()
+
+		err = watcher.WatchFlags(configFile, fsnotify.FSN_MODIFY|fsnotify.FSN_RENAME)
+
+		if err != nil {
+			logs.Error("监控配置文件失败 ->", err)
+			return err
 		}
 	}
 	return nil
