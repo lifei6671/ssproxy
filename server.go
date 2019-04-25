@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+type ConnHandler func(conn net.Conn) error
+
 //需要处理服务器端无法解析的请求头
 var hopHeaders = []string{
 	"Connection",
@@ -44,10 +46,16 @@ type ProxyServer struct {
 	WriteTimeout time.Duration
 	closed       bool
 	defaultProxy *ProxyTunnel
+	wrappers     []ConnHandler
 }
 
 func NewProxyServer() *ProxyServer {
-	return &ProxyServer{tunnel: &sync.Map{}, rule: NewMatcher(), blacklist: NewMatcher()}
+	return &ProxyServer{
+		tunnel:    &sync.Map{},
+		rule:      NewMatcher(),
+		blacklist: NewMatcher(),
+		wrappers:  make([]ConnHandler, 0),
+	}
 }
 
 func (p *ProxyServer) SetDeadline(duration time.Duration) *ProxyServer {
@@ -85,8 +93,8 @@ func (p *ProxyServer) SetDefaultProxy(tunnel *ProxyTunnel) {
 }
 
 // AddConnectionWrappers 增加连接的包装器
-func (p *ProxyServer) AddConnectionWrappers() *ProxyServer {
-
+func (p *ProxyServer) AddConnectionWrappers(handler ConnHandler) *ProxyServer {
+	p.wrappers = append(p.wrappers, handler)
 	return p
 }
 
@@ -142,6 +150,13 @@ func (p *ProxyServer) Listen(ctx context.Context, network, address string) error
 
 func (p *ProxyServer) doProxy(c net.Conn) error {
 
+	if p.wrappers != nil {
+		for _, handler := range p.wrappers {
+			if err := handler(c); err != nil {
+				return err
+			}
+		}
+	}
 	cr := bufio.NewReader(c)
 
 	buff, err := cr.Peek(3)
