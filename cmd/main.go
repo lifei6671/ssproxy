@@ -41,21 +41,10 @@ var start = &cli.Command{
 	Description: `启动一个本地代理,支持HTTP、Socks5代理，支持二级代理以及ShadowSocks.`,
 	Flags: []cli.Flag{
 		&cli.StringFlag{
-			Name:    "gfwlist",
-			Aliases: []string{"gfw"},
-			Value:   defaultGFWListURL,
-			Usage:   "GFW文件原始URL",
-		},
-		&cli.StringFlag{
 			Name:    "config",
 			Aliases: []string{"f"},
 			Value:   "./config/config.toml",
 			Usage:   "配置文件路径",
-		},
-		&cli.StringFlag{
-			Name:  "addr",
-			Value: ":8580",
-			Usage: "本地监听的地址和端口号：127.0.0.1:8580",
 		},
 		&cli.BoolFlag{
 			Name:  "pprof",
@@ -145,6 +134,9 @@ func loadConfig(proxy *ssproxy.ProxyServer, configFile string) error {
 				logs.Error("添加黑名单失败 ->", err)
 			}
 		}
+	}
+	if d, ok := config.Proxy["default"]; ok {
+		proxy.SetDefaultProxy(&d)
 	}
 	return nil
 }
